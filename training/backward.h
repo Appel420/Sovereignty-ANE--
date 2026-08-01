@@ -12,6 +12,8 @@
 #include <stdlib.h>
 
 // Structured status returned by hardened CPU attention routines.
+#ifndef ANE_STATUS_DEFINED
+#define ANE_STATUS_DEFINED 1
 typedef enum {
     ANE_OK = 0,
     ANE_ERR_CONFIG,
@@ -19,6 +21,7 @@ typedef enum {
     ANE_ERR_NUMERIC,
     ANE_ERR_INTERNAL
 } ANE_Status;
+#endif
 
 static bool attention_mul_overflow_size(size_t a, size_t b, size_t *out) {
     if (!out) return true;
