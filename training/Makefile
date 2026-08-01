@@ -10,6 +10,12 @@ HEADERS_ANE = $(HEADERS_LARGE) ane_rmsnorm_bwd.h ane_classifier.h
 train: train.m ane_runtime.h ane_mil_gen.h model.h forward.h backward.h
 	$(CC) $(CFLAGS) -o $@ train.m $(LDFLAGS)
 
+test_attention_contract: test_attention_contract.m ane_runtime.h ane_mil_gen.h model.h forward.h backward.h
+	$(CC) $(CFLAGS) -o $@ test_attention_contract.m $(LDFLAGS)
+
+test: test_attention_contract
+	./test_attention_contract
+
 train_large: train_large.m $(HEADERS_LARGE)
 	$(CC) $(CFLAGS) -o $@ train_large.m $(LDFLAGS) -framework Accelerate
 
@@ -42,7 +48,7 @@ tokenize:
 	python3 tokenize.py
 
 clean:
-	rm -f train train_large train_large_ane $(PROBES) test_rmsnorm_bwd test_classifier
+	rm -f train train_large train_large_ane test_attention_contract $(PROBES) test_rmsnorm_bwd test_classifier
 
-.PHONY: clean tokenize probes
+.PHONY: clean test tokenize probes
 
