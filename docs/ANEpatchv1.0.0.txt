@@ -1,0 +1,118 @@
+ANEpatchv1.0.0
+Sovereignty-ANE Production Attention Hardening Record
+Version: 1.0.0
+
+STATUS
+======
+Production contract document.
+
+Scope:
+- CPU attention forward
+- CPU attention backward
+- ANE compatibility boundary
+- Regression validation
+
+Implemented guarantees:
+
+CONFIGURATION
+=============
+- Reject invalid sequence lengths.
+- Reject invalid dimensions.
+- Validate:
+      dim == n_heads * head_dim
+  before tensor access.
+- Compute size products using size_t.
+
+STRIDE AND INDEXING
+===================
+- Single authoritative row stride.
+- No unchecked integer offsets.
+- Token and head pointers established before inner loops.
+
+MEMORY
+======
+- Temporary attention memory O(S).
+- No allocation inside inner loops.
+- Overflow checked before allocation.
+- NULL initialized temporaries.
+- Unified cleanup paths.
+
+NUMERICS
+========
+- Max-subtracted softmax.
+- Degenerate normalization rejection.
+- NaN/Inf detection.
+- ANE_ERR_NUMERIC on invalid states.
+
+ERROR CONTRACT
+==============
+ANE_ERR_CONFIG
+ANE_ERR_OOM
+ANE_ERR_NUMERIC
+ANE_ERR_INTERNAL
+
+BACKWARD CONTRACT
+=================
+- Preserve pre-residual activations.
+- Split residual gradients.
+- Validate finite differences < 1e-4.
+- Validate multi-head consistency.
+
+REGRESSION MATRIX
+=================
+PASS REQUIRED:
+[ ] valid layouts
+[ ] invalid layouts
+[ ] single-head
+[ ] head_dim=1
+[ ] maximum dimensions
+[ ] allocation overflow
+[ ] injected OOM
+[ ] uniform logits
+[ ] extreme logits
+[ ] randomized logits
+[ ] NaN rejection
+[ ] Inf rejection
+[ ] residual gradients
+
+ANE VALIDATION
+==============
+CPU implementation remains reference.
+ANE execution requires:
+CPU output == ANE output
+within tolerance.
+No silent fallback.
+All backend selection events are logged.
+
+SECURITY
+========
+Release requires:
+- deterministic build identity
+- artifact hash
+- signed manifest
+- SCAR evidence record
+
+RELEASE
+=======
+Sovereignty-ANE v1.0.0
+Production contract candidate.
+
+Next actual code patch after adding this artifact:
+
+Patch 22 — Resolve remaining compile boundary issues
+
+Specifically:
+
+1. Find all callers of changed ANE_Status functions.
+2. Replace ignored return values.
+3. Fix any implicit int → size_t conversions.
+4. Add missing prototypes.
+5. Run:
+
+cd training
+make clean
+make test
+
+6. Then run the full attention regression matrix.
+
+No cloud agent handoff. No external delegation. Continue in this thread only.
