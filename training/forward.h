@@ -2,7 +2,30 @@
 #pragma once
 #include "model.h"
 #include <math.h>
+#include <float.h>
+#include <stdint.h>
+#include <stddef.h>
+#include <stdbool.h>
 #include <string.h>
+#include <stdlib.h>
+
+#ifndef ANE_STATUS_DEFINED
+#define ANE_STATUS_DEFINED 1
+typedef enum {
+    ANE_OK = 0,
+    ANE_ERR_CONFIG,
+    ANE_ERR_OOM,
+    ANE_ERR_NUMERIC,
+    ANE_ERR_INTERNAL
+} ANE_Status;
+#endif
+
+static bool attention_forward_mul_overflow_size(size_t a, size_t b, size_t *out) {
+    if (!out) return true;
+    if (a != 0 && b > SIZE_MAX / a) return true;
+    *out = a * b;
+    return false;
+}
 
 // ANE conv eval: input [S, in_dim] row-major → transpose to [in_dim, S] channels-first
 // ANE computes conv(W, x) with baked W → output [out_dim, S]
@@ -69,33 +92,106 @@ static void cpu_rope(float *q, float *k, int S, int n_heads, int head_dim) {
             }
 }
 
-static void cpu_attention(float *out, const float *q, const float *k, const float *v,
-                          int S, int n_heads, int head_dim) {
-    float scale = 1.0f / sqrtf((float)head_dim);
-    float *scores = (float*)malloc(S * S * sizeof(float));
-    for (int h = 0; h < n_heads; h++) {
-        int D = n_heads * head_dim;
-        for (int t = 0; t < S; t++) {
-            float mx = -1e9f;
-            for (int s = 0; s <= t; s++) {
-                float dot = 0;
-                for (int i = 0; i < head_dim; i++)
-                    dot += q[t*D + h*head_dim + i] * k[s*D + h*head_dim + i];
+// Hardened causal CPU attention. Temporary workspace is O(S), not O(S^2).
+static ANE_Status cpu_attention_forward(const Model *m, float *out,
+                                        const float *q, const float *k, const float *v,
+                                        size_t S, int n_heads, int head_dim) {
+    if (!m || !out || !q || !k || !v || S == 0 || n_heads <= 0 ||
+        head_dim <= 0 || m->cfg.dim <= 0)
+        return ANE_ERR_CONFIG;
+
+    const size_t stride = (size_t)m->cfg.dim;
+    const size_t expected_dim = (size_t)n_heads * (size_t)head_dim;
+    if (expected_dim != stride)
+        return ANE_ERR_CONFIG;
+
+    size_t workspace_bytes = 0;
+    if (attention_forward_mul_overflow_size(S, sizeof(float), &workspace_bytes))
+        return ANE_ERR_OOM;
+
+    float *scores = (float *)malloc(workspace_bytes);
+    if (!scores)
+        return ANE_ERR_OOM;
+
+    ANE_Status status = ANE_OK;
+    const float scale = 1.0f / sqrtf((float)head_dim);
+    if (!isfinite(scale)) {
+        status = ANE_ERR_NUMERIC;
+        goto cleanup;
+    }
+
+    for (size_t h = 0; h < (size_t)n_heads; ++h) {
+        const size_t head_offset = h * (size_t)head_dim;
+        for (size_t t = 0; t < S; ++t) {
+            const float *q_head = q + t * stride + head_offset;
+            float *out_head = out + t * stride + head_offset;
+            float max_score = -INFINITY;
+
+            for (size_t s = 0; s <= t; ++s) {
+                const float *k_head = k + s * stride + head_offset;
+                float dot = 0.0f;
+                for (size_t i = 0; i < (size_t)head_dim; ++i)
+                    dot += q_head[i] * k_head[i];
                 scores[s] = dot * scale;
-                if (scores[s] > mx) mx = scores[s];
+                if (!isfinite(scores[s])) {
+                    status = ANE_ERR_NUMERIC;
+                    goto cleanup;
+                }
+                if (scores[s] > max_score) max_score = scores[s];
             }
-            float sm = 0;
-            for (int s = 0; s <= t; s++) { scores[s] = expf(scores[s] - mx); sm += scores[s]; }
-            for (int s = 0; s <= t; s++) scores[s] /= sm;
-            for (int i = 0; i < head_dim; i++) {
-                float val = 0;
-                for (int s = 0; s <= t; s++)
-                    val += scores[s] * v[s*D + h*head_dim + i];
-                out[t*D + h*head_dim + i] = val;
+
+            float sum = 0.0f;
+            for (size_t s = 0; s <= t; ++s) {
+                scores[s] = expf(scores[s] - max_score);
+                if (!isfinite(scores[s])) {
+                    status = ANE_ERR_NUMERIC;
+                    goto cleanup;
+                }
+                sum += scores[s];
+            }
+            if (!isfinite(sum) || sum <= FLT_MIN) {
+                status = ANE_ERR_NUMERIC;
+                goto cleanup;
+            }
+
+            for (size_t i = 0; i < (size_t)head_dim; ++i)
+                out_head[i] = 0.0f;
+
+            for (size_t s = 0; s <= t; ++s) {
+                const float probability = scores[s] / sum;
+                const float *v_head = v + s * stride + head_offset;
+                if (!isfinite(probability)) {
+                    status = ANE_ERR_NUMERIC;
+                    goto cleanup;
+                }
+                for (size_t i = 0; i < (size_t)head_dim; ++i)
+                    out_head[i] += probability * v_head[i];
+            }
+
+            for (size_t i = 0; i < (size_t)head_dim; ++i) {
+                if (!isfinite(out_head[i])) {
+                    status = ANE_ERR_NUMERIC;
+                    goto cleanup;
+                }
             }
         }
     }
+
+cleanup:
     free(scores);
+    return status;
+}
+
+// Compatibility wrapper for existing callers that cannot propagate status.
+// A failure is represented as NaN in the output so model_forward can abort.
+static void cpu_attention(float *out, const float *q, const float *k, const float *v,
+                          int S, int n_heads, int head_dim) {
+    Model config = {0};
+    config.cfg.dim = n_heads > 0 && head_dim > 0 ? n_heads * head_dim : 0;
+    if (cpu_attention_forward(&config, out, q, k, v, (size_t)(S > 0 ? S : 0),
+                              n_heads, head_dim) != ANE_OK && out) {
+        out[0] = NAN;
+    }
 }
 
 static inline float silu_f(float x) { return x / (1.0f + expf(-x)); }
@@ -125,7 +221,14 @@ static float model_forward(Model *m, const int *tokens, bool use_ane) {
         }
 
         cpu_rope(m->act_q[l], m->act_k[l], S, nh, hdim);
-        cpu_attention(m->act_attn_out[l], m->act_q[l], m->act_k[l], m->act_v[l], S, nh, hdim);
+        Model attention_config = *m;
+        ANE_Status attention_status = cpu_attention_forward(
+            &attention_config, m->act_attn_out[l], m->act_q[l], m->act_k[l],
+            m->act_v[l], (size_t)S, nh, hdim);
+        if (attention_status != ANE_OK) {
+            free(x);
+            return NAN;
+        }
 
         float *o_out = (float*)malloc(S * d * sizeof(float));
         if (use_ane) {
