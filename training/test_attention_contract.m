@@ -25,7 +25,31 @@ static void test_overflow_detection(void) {
     assert(attention_mul_overflow_size(1, 1, NULL));
 }
 
-static void test_valid_and_numeric_paths(void) {
+static void test_forward_paths(void) {
+    Model model = {0};
+    model.cfg.dim = 2;
+
+    const float q[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    const float k[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    const float v[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+    float out[4] = {NAN, NAN, NAN, NAN};
+
+    assert(cpu_attention_forward(&model, out, q, k, v, 2, 1, 2) == ANE_OK);
+    assert(fabsf(out[0] - 1.0f) < 1e-6f);
+    assert(fabsf(out[1] - 2.0f) < 1e-6f);
+    assert(fabsf(out[2] - 2.0f) < 1e-6f);
+    assert(fabsf(out[3] - 3.0f) < 1e-6f);
+
+    float nan_q[4] = {0.0f, NAN, 0.0f, 0.0f};
+    assert(cpu_attention_forward(&model, out, nan_q, k, v, 2, 1, 2)
+           == ANE_ERR_NUMERIC);
+    assert(cpu_attention_forward(&model, out, q, k, v, 0, 1, 2)
+           == ANE_ERR_CONFIG);
+    assert(cpu_attention_forward(&model, out, q, k, v, 2, 2, 2)
+           == ANE_ERR_CONFIG);
+}
+
+static void test_backward_paths(void) {
     Model model = {0};
     model.cfg.dim = 2;
 
@@ -52,7 +76,8 @@ int main(void) {
     @autoreleasepool {
         test_configuration_validation();
         test_overflow_detection();
-        test_valid_and_numeric_paths();
+        test_forward_paths();
+        test_backward_paths();
     }
     return 0;
 }
